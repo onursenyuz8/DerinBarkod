@@ -1,47 +1,75 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
-const baseUrl = 'https://barkod.derinwifi.com/api';
-const apiKey  = '12567894389';
+class ApiService {
+  static const String baseUrl = "https://barkod.derinwifi.com/api";
+  static const String apiKey = "12567894389"; // sabit API key
 
-Future<List<dynamic>> fetchToptancilar({String q = '', int page = 1, int limit = 50}) async {
-  final uri = Uri.parse('$baseUrl/toptancilar.php')
-      .replace(queryParameters: {
-        'q': q,
-        'page': '$page',
-        'limit': '$limit',
-        'key': apiKey, // basit auth
-      });
-  final res = await http.get(uri);
-  if (res.statusCode != 200) throw Exception('Liste hata: ${res.body}');
-  final json = jsonDecode(res.body);
-  return (json['items'] as List?) ?? [];
-}
+  // --- Toptancılar listesi ---
+  static Future<List<dynamic>> getToptancilar() async {
+    final res = await http.get(
+      Uri.parse("$baseUrl/toptancilar.php?key=$apiKey"),
+      headers: {"Accept": "application/json"},
+    );
+    if (res.statusCode == 200) {
+      final data = json.decode(res.body);
+      return data["items"] ?? [];
+    } else {
+      throw Exception("Toptancılar alınamadı");
+    }
+  }
 
-Future<Map<String, dynamic>> fetchToptanciDetay(int id) async {
-  final uri = Uri.parse('$baseUrl/toptanci.php')
-      .replace(queryParameters: {'id':'$id','key':apiKey});
-  final res = await http.get(uri);
-  if (res.statusCode != 200) throw Exception('Detay hata: ${res.body}');
-  return jsonDecode(res.body) as Map<String, dynamic>;
-}
+  // --- Yeni toptancı ekle ---
+  static Future<bool> createToptanci(String ad, String telefon) async {
+    final res = await http.post(
+      Uri.parse("$baseUrl/toptanci_ekle.php?key=$apiKey"),
+      headers: {"Content-Type": "application/json"},
+      body: json.encode({"ad": ad, "telefon": telefon}),
+    );
+    return res.statusCode == 200;
+  }
 
-Future<bool> createHareket({
-  required int toptanciId,
-  required String tarih,    // YYYY-MM-DD
-  required String tur,      // Alış | Ödeme | İade
-  required String tutar,    // "1234,50" veya "1234.50"
-  String aciklama = '',
-}) async {
-  final req = http.MultipartRequest('POST', Uri.parse('$baseUrl/hareket_create.php'));
-  req.fields['key'] = apiKey;
-  req.fields['toptanci_id'] = '$toptanciId';
-  req.fields['tarih'] = tarih;
-  req.fields['tur'] = tur;
-  req.fields['tutar'] = tutar;
-  req.fields['aciklama'] = aciklama;
-  final res = await req.send();
-  final body = await res.stream.bytesToString();
-  if (res.statusCode == 201 || res.statusCode == 200) return true;
-  throw Exception('Hareket ekleme hata: $body');
+  // --- Toptancı detayını getir ---
+  static Future<Map<String, dynamic>> getToptanciDetail(int id) async {
+    final res = await http.get(
+      Uri.parse("$baseUrl/toptanci_detay.php?id=$id&key=$apiKey"),
+      headers: {"Accept": "application/json"},
+    );
+    if (res.statusCode == 200) {
+      return json.decode(res.body);
+    } else {
+      throw Exception("Detay alınamadı");
+    }
+  }
+
+  // --- Hareket ekle (opsiyonel resim ile) ---
+  static Future<bool> addHareket({
+    required int toptanciId,
+    required String tur,
+    required double tutar,
+    required String aciklama,
+    File? imageFile,
+  }) async {
+    final url = Uri.parse("$baseUrl/hareket_ekle.php?key=$apiKey");
+    final req = http.MultipartRequest("POST", url);
+    req.fields["toptanci_id"] = toptanciId.toString();
+    req.fields["tur"] = tur;
+    req.fields["tutar"] = tutar.toString();
+    req.fields["aciklama"] = aciklama;
+
+    if (imageFile != null) {
+      req.files.add(
+        await http.MultipartFile.fromPath(
+          "resim",
+          imageFile.path,
+          contentType: MediaType("image", "jpeg"),
+        ),
+      );
+    }
+
+    final res = await req.send();
+    return res.statusCode == 200;
+  }
 }
