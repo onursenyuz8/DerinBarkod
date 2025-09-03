@@ -5,12 +5,6 @@ workflows:
     max_build_duration: 60
     environment:
       flutter: stable
-      vars:
-        # Optional: If you store google-services.json content as a single-line base64 string in CM_GOOGLESERVICES_JSON
-        # Codemagic → App settings → Environment variables (secure)
-        CM_GOOGLESERVICES_JSON: ""
-      groups:
-        - keystore_creds  # (Optional) define this group in Codemagic if you want to reuse variables
     triggering:
       events:
         - push
@@ -23,29 +17,26 @@ workflows:
         script: |
           flutter --version
           flutter doctor -v
-      - name: Ensure Android SDK licenses accepted
+      - name: Accept Android SDK licenses
         script: yes | sdkmanager --licenses || true
       - name: Create android/local.properties
         script: |
           mkdir -p android
-          # Codemagic default Flutter SDK & Android SDK paths
           echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
           echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
           cat android/local.properties
-      - name: (Optional) Write google-services.json if provided
+      - name: (Optional) Write google-services.json if CM_GOOGLESERVICES_JSON is set
         script: |
-          if [ -n "$CM_GOOGLESERVICES_JSON" ]; then
+          if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
             echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
             echo "google-services.json written."
           else
             echo "CM_GOOGLESERVICES_JSON not set. Skipping Firebase."
           fi
-      - name: Get Flutter packages
-        script: |
-          flutter pub get
+      - name: Fetch packages
+        script: flutter pub get
       - name: Build debug APK
-        script: |
-          flutter build apk --debug
+        script: flutter build apk --debug
     artifacts:
       - build/app/outputs/flutter-apk/app-debug.apk
 
@@ -54,8 +45,6 @@ workflows:
     max_build_duration: 60
     environment:
       flutter: stable
-      vars:
-        CM_GOOGLESERVICES_JSON: ""
     scripts:
       - name: Setup local.properties
         script: |
@@ -63,11 +52,12 @@ workflows:
           echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
       - name: (Optional) Write google-services.json
         script: |
-          if [ -n "$CM_GOOGLESERVICES_JSON" ]; then
+          if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
             echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
           fi
       - name: Build release APK (unsigned)
         script: |
+          flutter pub get
           flutter build apk --release
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
@@ -78,14 +68,7 @@ workflows:
     environment:
       flutter: stable
       groups:
-        - keystore_creds     # create this in Codemagic and include the 4 vars below
-      vars:
-        CM_GOOGLESERVICES_JSON: ""
-        # Required env vars in the "keystore_creds" group:
-        # CM_KEYSTORE:        base64 of your keystore file (e.g. derinbarkod.jks)
-        # CM_KEYSTORE_PASSWORD: password for the keystore
-        # CM_KEY_ALIAS:       alias name within the keystore
-        # CM_KEY_PASSWORD:    password for the key alias
+        - keystore_creds    # define this group in Codemagic UI with CM_KEYSTORE, CM_KEYSTORE_PASSWORD, CM_KEY_ALIAS, CM_KEY_PASSWORD
     scripts:
       - name: Setup local.properties
         script: |
@@ -93,13 +76,13 @@ workflows:
           echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
       - name: (Optional) Write google-services.json
         script: |
-          if [ -n "$CM_GOOGLESERVICES_JSON" ]; then
+          if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
             echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
           fi
       - name: Prepare keystore from env (base64 → file)
         script: |
-          if [ -z "$CM_KEYSTORE" ]; then
-            echo "CM_KEYSTORE not set. Please add keystore_creds group with CM_KEYSTORE, CM_KEYSTORE_PASSWORD, CM_KEY_ALIAS, CM_KEY_PASSWORD."
+          if [ -z "${CM_KEYSTORE:-}" ]; then
+            echo "CM_KEYSTORE not set. Add keystore_creds group with CM_KEYSTORE, CM_KEYSTORE_PASSWORD, CM_KEY_ALIAS, CM_KEY_PASSWORD."
             exit 1
           fi
           echo "$CM_KEYSTORE" | base64 --decode > android/app/derinbarkod.keystore
@@ -125,10 +108,8 @@ workflows:
           EOF
           )
           APP_GRADLE="android/app/build.gradle"
-          # If 'signingConfigs.release' not in file, inject minimal block
           if ! grep -q "signingConfigs.release" "$APP_GRADLE"; then
             echo "Injecting signing config into $APP_GRADLE"
-            # Insert under 'android {' block
             awk -v block="$SIGN_BLOCK" '
               BEGIN{printed=0}
               /android[[:space:]]*\{/ && !printed {print; print block; printed=1; next}
@@ -137,7 +118,6 @@ workflows:
           else
             echo "Signing config already present."
           fi
-          echo "---- build.gradle (head) ----"
           head -n 80 android/app/build.gradle || true
       - name: Build signed AAB
         script: |
