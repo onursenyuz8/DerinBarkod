@@ -1,14 +1,23 @@
 workflows:
   android_debug:
-    name: Android Debug (oto teşhis + düzeltme)
+    name: Android Debug
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+
     environment:
       flutter: stable
       java: 17
+
     cache:
       cache_paths:
         - $HOME/.pub-cache
         - android/.gradle
         - .gradle
+
     scripts:
       - name: Ortam bilgisi
         script: |
@@ -26,90 +35,79 @@ workflows:
 
       - name: Android tarafını normalize et (AGP/Gradle/Kotlin/SDK/namespace)
         script: |
-          set -e
-          cd android
+          set +e
+          set -x
+          cd android || exit 0
 
-          # 1) Gradle wrapper → 8.7
+          # Gradle wrapper → 8.7
           if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
-            sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-all.zip#' gradle/wrapper/gradle-wrapper.properties
+            sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-all.zip#' gradle/wrapper/gradle-wrapper.properties || true
           fi
 
-          # 2) settings.gradle → plugin versiyonları
+          # settings.gradle → repo + plugin versiyonları
           if [ -f settings.gradle ]; then
-            if ! grep -q 'dev.flutter.flutter-plugin-loader' settings.gradle; then
-              # Eski şablon ise en azından repo blokları olsun
-              sed -i '1s;^;pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\n;' settings.gradle
-            fi
-            # AGP 8.6.0 ve Kotlin 1.9.24
-            if ! grep -q 'id "com.android.application" version "8.6.0"' settings.gradle; then
-              sed -i '1s;^;plugins { id "dev.flutter.flutter-plugin-loader" version "1.0.0"; printf("\n"); };\n;' settings.gradle || true
-              sed -i 's/id "com.android.application" version "[^"]*"/id "com.android.application" version "8.6.0"/' settings.gradle || true
-              sed -i 's/id "org.jetbrains.kotlin.android" version "[^"]*"/id "org.jetbrains.kotlin.android" version "1.9.24"/' settings.gradle || true
-            fi
+            grep -q 'pluginManagement' settings.gradle || \
+              (printf 'pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\n' | cat - settings.gradle > settings.gradle.new && mv settings.gradle.new settings.gradle)
+            grep -q 'dev.flutter.flutter-plugin-loader' settings.gradle || \
+              (printf 'plugins { id "dev.flutter.flutter-plugin-loader" version "1.0.0" }\n' | cat - settings.gradle > settings.gradle.new && mv settings.gradle.new settings.gradle)
+            sed -i 's/id "com.android.application" version "[^"]*"/id "com.android.application" version "8.6.0"/' settings.gradle || true
+            sed -i 's/id "org.jetbrains.kotlin.android" version "[^"]*"/id "org.jetbrains.kotlin.android" version "1.9.24"/' settings.gradle || true
           fi
 
-          # 3) build.gradle (top-level) — repo ve AGP classpath (varsa)
+          # build.gradle (top-level)
           if [ -f build.gradle ]; then
-            if ! grep -q 'mavenCentral()' build.gradle; then
-              sed -i 's/repositories {/repositories { mavenCentral()/g' build.gradle || true
-            fi
+            grep -q 'mavenCentral()' build.gradle || sed -i 's/repositories {/repositories { mavenCentral()/g' build.gradle || true
             sed -i 's/com.android.tools.build:gradle:[0-9.]\+/com.android.tools.build:gradle:8.6.0/' build.gradle || true
           fi
 
-          # 4) app/build.gradle → compile/targetSdk, namespace, Java 17, multidex
+          # app/build.gradle
           if [ -f app/build.gradle ]; then
             sed -i 's/compileSdkVersion [0-9]\+/compileSdkVersion 34/' app/build.gradle || true
             sed -i 's/targetSdkVersion [0-9]\+/targetSdkVersion 34/' app/build.gradle || true
 
-            # namespace yoksa ekle
             if ! grep -q '^ *namespace ' app/build.gradle; then
-              # package adını AndroidManifest veya defaultConfig.applicationId'den yakalamaya çalış
               PKG=$(grep -Po 'applicationId\s*"\K[^"]+' app/build.gradle || true)
-              if [ -z "$PKG" ]; then
-                PKG=$(grep -Po 'package="\K[^"]+' app/src/main/AndroidManifest.xml || echo "com.example.app")
+              [ -z "$PKG" ] && PKG=$(grep -Po 'package="\K[^"]+' app/src/main/AndroidManifest.xml || echo "com.example.app")
+              if grep -q '^android *{' app/build.gradle; then
+                awk -v ns="$PKG" '{
+                  print
+                  if ($0 ~ /^android *{/) {print "    namespace \"" ns "\""}
+                }' app/build.gradle > app/build.gradle.new && mv app/build.gradle.new app/build.gradle
+              else
+                printf 'android {\n    namespace "%s"\n}\n\n' "$PKG" | cat - app/build.gradle > app/build.gradle.new && mv app/build.gradle.new app/build.gradle
               fi
-              sed -i "1s;^;android {\n    namespace \"$PKG\"\n}\n\n;" app/build.gradle
-              # android bloğunu iki kez oluşturduysak sadeleşsin diye tekrar düzenleyelim
-              awk 'BEGIN{p=1} /android *\{/ && ++c==2{p=0} {if(p)print} /}/ && c==2{p=1}' app/build.gradle > app/build.gradle.tmp && mv app/build.gradle.tmp app/build.gradle
             fi
 
-            # Java/Kotlin 17
-            if ! grep -q 'sourceCompatibility JavaVersion.VERSION_17' app/build.gradle; then
-              sed -i '/android *{/a\    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }\n    kotlinOptions { jvmTarget = "17" }' app/build.gradle
-            fi
+            grep -q 'sourceCompatibility JavaVersion.VERSION_17' app/build.gradle || \
+              awk '1; /android *{/ {print "    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }"; print "    kotlinOptions { jvmTarget = \"17\" }"}' app/build.gradle > app/build.gradle.new && mv app/build.gradle.new app/build.gradle
 
-            # multidex
-            if ! grep -q 'multiDexEnabled true' app/build.gradle; then
-              sed -i 's/defaultConfig {/defaultConfig {\n        multiDexEnabled true/' app/build.gradle
-            fi
+            grep -q 'multiDexEnabled true' app/build.gradle || sed -i 's/defaultConfig {/defaultConfig {\n        multiDexEnabled true/' app/build.gradle
           fi
 
-          # 5) Manifest’teki package özniteliğini kaldır (AGP 8+ için namespace kullanıyoruz)
+          # Manifest’te package özniteliğini kaldır
           if [ -f app/src/main/AndroidManifest.xml ]; then
             sed -i 's/ package="[^"]*"//' app/src/main/AndroidManifest.xml || true
           fi
 
-          cd ..
+          cd -
+          set +x
+
+      - name: İnceleme için kritik dosyaları topla
+        script: |
+          mkdir -p ci_artifacts
+          cp -f android/gradle/wrapper/gradle-wrapper.properties ci_artifacts/ || true
+          cp -f android/settings.gradle ci_artifacts/ || true
+          cp -f android/build.gradle ci_artifacts/ || true
+          cp -f android/app/build.gradle ci_artifacts/ || true
+          cp -f android/app/src/main/AndroidManifest.xml ci_artifacts/ || true
 
       - name: Derleme (detaylı log + rapor)
         script: |
           set -o pipefail
           flutter clean
           flutter build apk --debug -v | tee build_log.txt
-          # AGP failure bloğunu çek
           echo "===== FAILURE BLOĞU (varsa) =====" > failure_extract.txt
           awk '/FAILURE: Build failed with an exception./{flag=1} flag{print} /BUILD FAILED/{flag=0}' build_log.txt | tail -n 200 >> failure_extract.txt || true
-
-      - name: YAML/Gradle önemli dosyaları kopyala (inceleme için)
-        script: |
-          mkdir -p ci_artifacts
-          cp -f build_log.txt ci_artifacts/ || true
-          cp -f failure_extract.txt ci_artifacts/ || true
-          cp -f android/gradle/wrapper/gradle-wrapper.properties ci_artifacts/ || true
-          cp -f android/settings.gradle ci_artifacts/ || true
-          cp -f android/build.gradle ci_artifacts/ || true
-          cp -f android/app/build.gradle ci_artifacts/ || true
-          cp -f android/app/src/main/AndroidManifest.xml ci_artifacts/ || true
 
       - name: Hata varsa kır
         script: |
