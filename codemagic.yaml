@@ -1,6 +1,6 @@
 workflows:
   debug_apk:
-    name: Android Debug APK (with patch)
+    name: Android Debug APK (safe patch)
     max_build_duration: 60
     environment:
       flutter: stable
@@ -27,13 +27,7 @@ workflows:
 
           mkdir -p "$SRC_NEW_DIR"
 
-          cat > "$SRC_NEW" <<'EOF'
-          package com.derinwifi.barkod
-
-          import io.flutter.embedding.android.FlutterActivity
-
-          class MainActivity : FlutterActivity()
-          EOF
+          printf '%s\n'             'package com.derinwifi.barkod'             ''             'import io.flutter.embedding.android.FlutterActivity'             ''             'class MainActivity : FlutterActivity()' > "$SRC_NEW"
 
           if [ -f "$SRC_OLD" ]; then
             rm -f "$SRC_OLD"
@@ -48,11 +42,6 @@ workflows:
               { print }
             ' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
           fi
-
-          echo "==== New MainActivity.kt ===="
-          head -n 20 "$SRC_NEW" || true
-          echo "==== AndroidManifest.xml (snippet) ===="
-          head -n 40 "$MANIFEST" || true
       - name: (Optional) Write google-services.json if CM_GOOGLESERVICES_JSON is set
         script: |
           if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
@@ -67,94 +56,3 @@ workflows:
         script: flutter build apk --debug
     artifacts:
       - build/app/outputs/flutter-apk/app-debug.apk
-
-  release_aab_signed:
-    name: Android App Bundle (signed, with patch)
-    max_build_duration: 60
-    environment:
-      flutter: stable
-      groups:
-        - keystore_creds    # bu grubu Codemagic UI'da oluştur
-    scripts:
-      - name: Setup local.properties
-        script: |
-          echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
-          echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
-      - name: Patch Android embedding (v2) and package path
-        script: |
-          set -e
-          APP_DIR="android/app"
-          SRC_OLD="$APP_DIR/src/main/kotlin/com/example/derin_barkod/MainActivity.kt"
-          SRC_NEW_DIR="$APP_DIR/src/main/kotlin/com/derinwifi/barkod"
-          SRC_NEW="$SRC_NEW_DIR/MainActivity.kt"
-          MANIFEST="$APP_DIR/src/main/AndroidManifest.xml"
-
-          mkdir -p "$SRC_NEW_DIR"
-
-          cat > "$SRC_NEW" <<'EOF'
-          package com.derinwifi.barkod
-
-          import io.flutter.embedding.android.FlutterActivity
-
-          class MainActivity : FlutterActivity()
-          EOF
-
-          if [ -f "$SRC_OLD" ]; then
-            rm -f "$SRC_OLD"
-          fi
-
-          if [ -f "$MANIFEST" ] && ! grep -q 'android:name="flutterEmbedding"' "$MANIFEST"; then
-            awk '
-              /<\/application>/ && !done {
-                print "        <meta-data android:name=\"flutterEmbedding\" android:value=\"2\" />"
-                done=1
-              }
-              { print }
-            ' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
-          fi
-      - name: (Optional) Write google-services.json
-        script: |
-          if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
-            echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
-          fi
-      - name: Prepare keystore from env (base64 → file)
-        script: |
-          if [ -z "${CM_KEYSTORE:-}" ]; then
-            echo "CM_KEYSTORE not set. Add keystore_creds group with CM_KEYSTORE, CM_KEYSTORE_PASSWORD, CM_KEY_ALIAS, CM_KEY_PASSWORD."
-            exit 1
-          fi
-          echo "$CM_KEYSTORE" | base64 --decode > android/app/derinbarkod.keystore
-      - name: Patch Gradle signingConfig if missing
-        script: |
-          SIGN_BLOCK=$(cat << 'EOF'
-              signingConfigs {
-                  release {
-                      storeFile file("derinbarkod.keystore")
-                      storePassword System.getenv("CM_KEYSTORE_PASSWORD")
-                      keyAlias System.getenv("CM_KEY_ALIAS")
-                      keyPassword System.getenv("CM_KEY_PASSWORD")
-                  }
-              }
-              buildTypes {
-                  release {
-                      signingConfig signingConfigs.release
-                      minifyEnabled false
-                      shrinkResources false
-                  }
-              }
-          EOF
-          )
-          APP_GRADLE="android/app/build.gradle"
-          if ! grep -q "signingConfigs.release" "$APP_GRADLE"; then
-            awk -v block="$SIGN_BLOCK" '
-              BEGIN{printed=0}
-              /android[[:space:]]*\{/ && !printed {print; print block; printed=1; next}
-              {print}
-            ' "$APP_GRADLE" > "$APP_GRADLE.tmp" && mv "$APP_GRADLE.tmp" "$APP_GRADLE"
-          fi
-      - name: Build signed AAB
-        script: |
-          flutter pub get
-          flutter build appbundle --release
-    artifacts:
-      - build/app/outputs/bundle/release/app-release.aab
