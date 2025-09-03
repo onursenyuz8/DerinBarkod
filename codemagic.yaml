@@ -12,7 +12,7 @@ workflows:
       flutter: stable
       java: 17
       vars:
-        # Paket adını istersen Codemagic env'de APPLICATION_ID ile geç
+        # İstersen Codemagic env'de APPLICATION_ID ile paket adını geçebilirsin
         APPLICATION_ID: com.derinwifi.barkod
 
     cache:
@@ -71,7 +71,7 @@ workflows:
           echo "=== local.properties ==="
           cat android/local.properties
 
-      # 4) Gradle/AGP/Kotlin pin (Flutter plugin SDK'dan include)
+      # 4) Gradle/AGP/Kotlin pin (Flutter plugin SDK'dan includeBuild)
       - name: Gradle/AGP/Kotlin/SDK pin
         script: |
           set -e
@@ -88,7 +88,7 @@ workflows:
           distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-all.zip
           EOF
 
-          # settings.gradle — plugin loader YOK; SDK'dan includeBuild
+          # settings.gradle — loader YOK; SDK'dan includeBuild
           cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
@@ -161,13 +161,6 @@ workflows:
           dependencies {
               implementation "androidx.multidex:multidex:2.0.1"
           }
-          // Gerekirse sürüm sabitleme örneği:
-          // configurations.all {
-          //   resolutionStrategy {
-          //     force 'com.google.android.gms:play-services-basement:18.3.0'
-          //     force 'androidx.core:core-ktx:1.10.1'
-          //   }
-          // }
           EOF
 
           # Manifest (package="" YOK)
@@ -202,7 +195,7 @@ workflows:
           cd "$APP_DIR"
           flutter pub get
 
-      # 6) Derle (Flutter + Gradle fallback)
+      # 6) Derle (Flutter + Gradle fallback) — DÜZELTİLMİŞ!
       - name: Debug APK derle (stacktrace; gradle fallback)
         script: |
           set -o pipefail
@@ -210,9 +203,8 @@ workflows:
           flutter clean
           if ! flutter build apk --debug -v | tee build_log.txt; then
             echo "Flutter build düştü, gradle assembleDebug deneniyor..."
-            (cd android && ./gradlew --version || true)
-            (cd android && ./gradlew tasks --all --no-daemon --stacktrace --info || true)
-            (cd android && ./gradlew assembleDebug --no-daemon --stacktrace --info --debug) | tee -a build_log.txt
+            # ÖNEMLİ: Dizini değiştirmeden, kökten gradle wrapper'ı android projesine işaret ederek çalıştır
+            ./android/gradlew -p android assembleDebug --no-daemon --stacktrace --info --debug | tee -a build_log.txt
           fi
 
       # 7) APK'yi topla
