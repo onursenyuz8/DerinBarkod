@@ -12,7 +12,7 @@ workflows:
       flutter: stable
       java: 17
       vars:
-        # Paket adını değiştirmek istersen Codemagic env'den APPLICATION_ID ver (örn. com.mavibilisim.derinbarkod)
+        # Paket adını istersen Codemagic env'den APPLICATION_ID ile geçebilirsin
         APPLICATION_ID: com.derinwifi.barkod
 
     cache:
@@ -44,13 +44,28 @@ workflows:
           chmod +x android/gradlew || true
           echo "=== android dizinleri ==="; ls -la android || true; ls -la android/app || true
 
-      - name: Gradle/AGP/Kotlin/SDK pin (dosyaları baştan yaz)
+      - name: local.properties yaz (flutter.sdk & sdk.dir)
+        script: |
+          set -e
+          export ANDROID_HOME=${ANDROID_SDK_ROOT:-/opt/android-sdk}
+          # FLUTTER_ROOT yoksa which flutter'dan türet
+          FLUTTER_ROOT="${FLUTTER_ROOT:-$(dirname $(dirname $(which flutter)))}"
+          echo "FLUTTER_ROOT=$FLUTTER_ROOT"
+          mkdir -p android
+          {
+            echo "flutter.sdk=$FLUTTER_ROOT"
+            echo "sdk.dir=$ANDROID_HOME"
+          } > android/local.properties
+          echo "=== local.properties ==="
+          cat android/local.properties
+
+      - name: Gradle/AGP/Kotlin/SDK pin (loader YOK, includeBuild VAR)
         script: |
           set -e
           cd android
           APP_ID="${APPLICATION_ID:-com.derinwifi.barkod}"
 
-          # Gradle wrapper -> 8.7
+          # 1) Gradle wrapper -> 8.7 (uyumlu)
           mkdir -p gradle/wrapper
           cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
           distributionBase=GRADLE_USER_HOME
@@ -60,7 +75,7 @@ workflows:
           distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-all.zip
           EOF
 
-          # settings.gradle
+          # 2) settings.gradle (PLUGIN LOADER YOK) — Flutter SDK içindeki Gradle'ı include et
           cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
@@ -69,15 +84,32 @@ workflows:
                   gradlePluginPortal()
               }
           }
+          // Flutter SDK yolunu local.properties'ten al
+          def localProperties = new Properties()
+          def localPropertiesFile = new File(rootProject.projectDir, "local.properties")
+          if (localPropertiesFile.exists()) {
+              localPropertiesFile.withReader("UTF-8") { reader -> localProperties.load(reader) }
+          }
+          def flutterSdkPath = localProperties.getProperty("flutter.sdk")
+          if (flutterSdkPath == null) {
+              flutterSdkPath = System.getenv("FLUTTER_ROOT")
+          }
+          if (flutterSdkPath == null) {
+              throw new GradleException("Flutter SDK not found. Set flutter.sdk in android/local.properties")
+          }
+
+          // Flutter Gradle eklentisini doğrudan SDK'dan projeye dahil et
+          includeBuild("${flutterSdkPath}/packages/flutter_tools/gradle")
+
           plugins {
-              id "dev.flutter.flutter-plugin-loader" version "1.0.0"
               id "com.android.application" version "8.6.0" apply false
               id "org.jetbrains.kotlin.android" version "1.9.24" apply false
           }
+
           include(":app")
           EOF
 
-          # top-level build.gradle (opsiyonel)
+          # 3) top-level build.gradle (repo'lar)
           cat > build.gradle <<'EOF'
           buildscript {
               repositories { google(); mavenCentral() }
@@ -88,11 +120,12 @@ workflows:
           }
           EOF
 
-          # app/build.gradle
+          # 4) app/build.gradle — AGP8 uyumlu, SDK 34, Java17, multidex
           cat > app/build.gradle <<EOF
           plugins {
               id "com.android.application"
               id "org.jetbrains.kotlin.android"
+              // Flutter gradle plugin, SDK'dan includeBuild ile geliyor
               id "dev.flutter.flutter-gradle-plugin"
           }
           android {
@@ -122,7 +155,7 @@ workflows:
           dependencies {
               implementation "androidx.multidex:multidex:2.0.1"
           }
-          // Çakışma olursa örnek sabitleme (gerekirse aktif et):
+          // Gerekirse çakışma sabitleme örnekleri:
           // configurations.all {
           //   resolutionStrategy {
           //     force 'com.google.android.gms:play-services-basement:18.3.0'
@@ -131,7 +164,7 @@ workflows:
           // }
           EOF
 
-          # Manifest (package="" olmayacak)
+          # 5) Manifest — package="" YOK!
           mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -153,12 +186,6 @@ workflows:
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
-                  <queries>
-                      <intent>
-                          <action android:name="android.intent.action.PROCESS_TEXT"/>
-                          <data android:mimeType="text/plain"/>
-                      </intent>
-                  </queries>
               </application>
           </manifest>
           EOF
@@ -167,7 +194,7 @@ workflows:
       - name: Bağımlılıkları al
         script: flutter pub get
 
-      - name: Debug APK derle (stacktrace ile; gradle fallback)
+      - name: Debug APK derle (stacktrace; gradle fallback)
         script: |
           set -o pipefail
           flutter clean
