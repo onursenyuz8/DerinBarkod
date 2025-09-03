@@ -1,6 +1,6 @@
 workflows:
   debug_apk:
-    name: Android Debug APK (safe patch)
+    name: Android Debug APK (safe patch v2)
     max_build_duration: 60
     environment:
       flutter: stable
@@ -9,30 +9,34 @@ workflows:
         script: |
           flutter --version
           flutter doctor -v
+
       - name: Accept Android SDK licenses
         script: yes | sdkmanager --licenses || true
+
       - name: Create android/local.properties
         script: |
           mkdir -p android
           echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
           echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
-      - name: Patch Android embedding (v2) and package path
+
+      - name: Patch Android embedding to V2 (MainActivity, Manifest)
         script: |
           set -e
           APP_DIR="android/app"
-          SRC_OLD="$APP_DIR/src/main/kotlin/com/example/derin_barkod/MainActivity.kt"
-          SRC_NEW_DIR="$APP_DIR/src/main/kotlin/com/derinwifi/barkod"
-          SRC_NEW="$SRC_NEW_DIR/MainActivity.kt"
           MANIFEST="$APP_DIR/src/main/AndroidManifest.xml"
 
+          # Ensure Kotlin dir exists and write V2 MainActivity
+          SRC_NEW_DIR="$APP_DIR/src/main/kotlin/com/derinwifi/barkod"
+          SRC_NEW="$SRC_NEW_DIR/MainActivity.kt"
           mkdir -p "$SRC_NEW_DIR"
-
           printf '%s\n'             'package com.derinwifi.barkod'             ''             'import io.flutter.embedding.android.FlutterActivity'             ''             'class MainActivity : FlutterActivity()' > "$SRC_NEW"
 
-          if [ -f "$SRC_OLD" ]; then
-            rm -f "$SRC_OLD"
-          fi
+          # Remove any old MainActivity paths (java/kotlin) with example package
+          rm -f "$APP_DIR/src/main/kotlin/com/example/derin_barkod/MainActivity.kt" || true
+          rm -f "$APP_DIR/src/main/java/com/example/derin_barkod/MainActivity.java" || true
+          rm -f "$APP_DIR/src/main/java/com/example/derin_barkod/MainActivity.kt" || true
 
+          # Inject flutterEmbedding=2 meta-data if missing
           if [ -f "$MANIFEST" ] && ! grep -q 'android:name="flutterEmbedding"' "$MANIFEST"; then
             awk '
               /<\/application>/ && !done {
@@ -42,17 +46,51 @@ workflows:
               { print }
             ' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
           fi
-      - name: (Optional) Write google-services.json if CM_GOOGLESERVICES_JSON is set
-        script: |
-          if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
-            echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
-            echo "google-services.json written."
-          else
-            echo "CM_GOOGLESERVICES_JSON not set. Skipping Firebase."
+
+          # Strip android:name from <application ...> to avoid v1 Application
+          if [ -f "$MANIFEST" ]; then
+            python3 - <<'PY'
+import re, sys, io
+p = "android/app/src/main/AndroidManifest.xml"
+with io.open(p, "r", encoding="utf-8") as f:
+    s = f.read()
+# remove android:name="..."
+s = re.sub(r'(\sandroid:name=\"[^\"]*\")', '', s)
+with io.open(p, "w", encoding="utf-8") as f:
+    f.write(s)
+print("Stripped android:name from application (if existed).")
+PY
           fi
+
+          echo "==== New MainActivity.kt ===="
+          sed -n '1,80p' "$SRC_NEW" || true
+          echo "==== AndroidManifest.xml (snippet) ===="
+          sed -n '1,120p' "$MANIFEST" || true
+
+      - name: Diagnostics for v1 plugins
+        script: |
+          set +e
+          echo "Searching for v1 embedding markers in Android code & plugins..."
+          grep -R "io.flutter.app.FlutterApplication" -n android || true
+          grep -R "io.flutter.plugin.common.PluginRegistry" -n android || true
+          grep -R "GeneratedPluginRegistrant" -n android || true
+          # Also scan pub cache after pub get
+          echo "Will scan .pub-cache after dependencies are fetched."
+
       - name: Fetch packages
         script: flutter pub get
+
+      - name: Diagnostics after pub get (plugins)
+        script: |
+          set +e
+          if [ -d "$HOME/.pub-cache" ]; then
+            grep -R "io.flutter.app.FlutterApplication" -n "$HOME/.pub-cache/hosted" || true
+            grep -R "io.flutter.plugin.common.PluginRegistry" -n "$HOME/.pub-cache/hosted" || true
+          fi
+          echo "If matches appear above, some plugins are v1-only. Consider upgrading them in pubspec.yaml."
+
       - name: Build debug APK
         script: flutter build apk --debug
+
     artifacts:
       - build/app/outputs/flutter-apk/app-debug.apk
