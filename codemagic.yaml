@@ -1,241 +1,147 @@
+
 workflows:
-  android_debug:
-    name: Android Debug (otonom + stabil)
+  debug_apk:
+    name: Android Debug APK
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      vars:
+        # Optional: If you store google-services.json content as a single-line base64 string in CM_GOOGLESERVICES_JSON
+        # Codemagic → App settings → Environment variables (secure)
+        CM_GOOGLESERVICES_JSON: ""
+      groups:
+        - keystore_creds  # (Optional) define this group in Codemagic if you want to reuse variables
     triggering:
       events:
         - push
       branch_patterns:
-        - pattern: main
+        - pattern: "main"
           include: true
+          source: true
+    scripts:
+      - name: Flutter version & doctor
+        script: |
+          flutter --version
+          flutter doctor -v
+      - name: Ensure Android SDK licenses accepted
+        script: yes | sdkmanager --licenses || true
+      - name: Create android/local.properties
+        script: |
+          mkdir -p android
+          # Codemagic default Flutter SDK & Android SDK paths
+          echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
+          echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
+          cat android/local.properties
+      - name: (Optional) Write google-services.json if provided
+        script: |
+          if [ -n "$CM_GOOGLESERVICES_JSON" ]; then
+            echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
+            echo "google-services.json written."
+          else
+            echo "CM_GOOGLESERVICES_JSON not set. Skipping Firebase."
+          fi
+      - name: Get Flutter packages
+        script: |
+          flutter pub get
+      - name: Build debug APK
+        script: |
+          flutter build apk --debug
+    artifacts:
+      - build/app/outputs/flutter-apk/app-debug.apk
 
+  release_apk_unsigned:
+    name: Android Release APK (unsigned)
+    max_build_duration: 60
     environment:
       flutter: stable
-      java: 17
       vars:
-        # İstersen Codemagic env'de APPLICATION_ID ile paket adını geçebilirsin
-        APPLICATION_ID: com.derinwifi.barkod
-
-    cache:
-      cache_paths:
-        - $HOME/.pub-cache
-        - android/.gradle
-        - .gradle
-
+        CM_GOOGLESERVICES_JSON: ""
     scripts:
-      # 0) Proje kökünü (pubspec.yaml olan klasörü) bul
-      - name: App dizinini bul (pubspec.yaml)
+      - name: Setup local.properties
         script: |
-          set -e
-          APP_DIR=$(dirname "$(find . -maxdepth 5 -name pubspec.yaml | head -n1)")
-          if [ -z "$APP_DIR" ]; then
-            echo "pubspec.yaml bulunamadı. Repo kökünü kontrol et."
-            ls -la
+          echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
+          echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
+      - name: (Optional) Write google-services.json
+        script: |
+          if [ -n "$CM_GOOGLESERVICES_JSON" ]; then
+            echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
+          fi
+      - name: Build release APK (unsigned)
+        script: |
+          flutter build apk --release
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+
+  release_aab_signed:
+    name: Android App Bundle (signed)
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      groups:
+        - keystore_creds     # create this in Codemagic and include the 4 vars below
+      vars:
+        CM_GOOGLESERVICES_JSON: ""
+        # Required env vars in the "keystore_creds" group:
+        # CM_KEYSTORE:        base64 of your keystore file (e.g. derinbarkod.jks)
+        # CM_KEYSTORE_PASSWORD: password for the keystore
+        # CM_KEY_ALIAS:       alias name within the keystore
+        # CM_KEY_PASSWORD:    password for the key alias
+    scripts:
+      - name: Setup local.properties
+        script: |
+          echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
+          echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
+      - name: (Optional) Write google-services.json
+        script: |
+          if [ -n "$CM_GOOGLESERVICES_JSON" ]; then
+            echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
+          fi
+      - name: Prepare keystore from env (base64 → file)
+        script: |
+          if [ -z "$CM_KEYSTORE" ]; then
+            echo "CM_KEYSTORE not set. Please add keystore_creds group with CM_KEYSTORE, CM_KEYSTORE_PASSWORD, CM_KEY_ALIAS, CM_KEY_PASSWORD."
             exit 1
           fi
-          echo "Bulunan APP_DIR: $APP_DIR"
-          echo "APP_DIR=$APP_DIR" >> $CM_ENV
-
-      # 1) Android SDK 34 ve Build-Tools
-      - name: Android SDK 34 + Build-Tools kur
+          echo "$CM_KEYSTORE" | base64 --decode > android/app/derinbarkod.keystore
+          ls -l android/app/derinbarkod.keystore
+      - name: Patch Gradle signingConfig if missing (non-destructive)
         script: |
-          set -e
-          export ANDROID_HOME=${ANDROID_SDK_ROOT:-/opt/android-sdk}
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
-          sdkmanager --list | head -n 50 || true
-
-      # 2) Android klasörü & gradlew
-      - name: Android klasörü ve gradlew kontrol
-        script: |
-          cd "$APP_DIR"
-          if [ ! -d android ]; then
-            echo "android/ yok; oluşturuluyor..."
-            flutter create --platforms=android .
-          fi
-          chmod +x android/gradlew || true
-          echo "=== android dizinleri ==="
-          ls -la android || true
-          ls -la android/app || true
-
-      # 3) local.properties yaz
-      - name: local.properties yaz (flutter.sdk & sdk.dir)
-        script: |
-          cd "$APP_DIR"
-          export ANDROID_HOME=${ANDROID_SDK_ROOT:-/opt/android-sdk}
-          FLUTTER_ROOT="${FLUTTER_ROOT:-$(dirname $(dirname $(which flutter)))}"
-          mkdir -p android
-          {
-            echo "flutter.sdk=$FLUTTER_ROOT"
-            echo "sdk.dir=$ANDROID_HOME"
-          } > android/local.properties
-          echo "=== local.properties ==="
-          cat android/local.properties
-
-      # 4) Gradle/AGP/Kotlin pin (Flutter plugin SDK'dan includeBuild)
-      - name: Gradle/AGP/Kotlin/SDK pin
-        script: |
-          set -e
-          cd "$APP_DIR/android"
-          APP_ID="${APPLICATION_ID:-com.derinwifi.barkod}"
-
-          # Gradle wrapper -> 8.7
-          mkdir -p gradle/wrapper
-          cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-all.zip
-          EOF
-
-          # settings.gradle — loader YOK; SDK'dan includeBuild
-          cat > settings.gradle <<'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          def localProperties = new Properties()
-          def localPropertiesFile = new File(rootProject.projectDir, "local.properties")
-          if (localPropertiesFile.exists()) {
-              localPropertiesFile.withReader("UTF-8") { reader -> localProperties.load(reader) }
-          }
-          def flutterSdkPath = localProperties.getProperty("flutter.sdk")
-          if (flutterSdkPath == null) { flutterSdkPath = System.getenv("FLUTTER_ROOT") }
-          if (flutterSdkPath == null) { throw new GradleException("Flutter SDK not found. Set flutter.sdk in android/local.properties") }
-
-          includeBuild("${flutterSdkPath}/packages/flutter_tools/gradle")
-
-          plugins {
-              id "com.android.application" version "8.6.0" apply false
-              id "org.jetbrains.kotlin.android" version "1.9.24" apply false
-          }
-
-          include(":app")
-          EOF
-
-          # top-level build.gradle
-          cat > build.gradle <<'EOF'
-          buildscript {
-              repositories { google(); mavenCentral() }
-              dependencies { classpath "com.android.tools.build:gradle:8.6.0" }
-          }
-          allprojects {
-              repositories { google(); mavenCentral() }
-          }
-          EOF
-
-          # app/build.gradle
-          cat > app/build.gradle <<EOF
-          plugins {
-              id "com.android.application"
-              id "org.jetbrains.kotlin.android"
-              id "dev.flutter.flutter-gradle-plugin"   // SDK'dan includeBuild ile geliyor
-          }
-          android {
-              namespace "${APP_ID}"
-              compileSdkVersion 34
-              defaultConfig {
-                  applicationId "${APP_ID}"
-                  minSdkVersion 23
-                  targetSdkVersion 34
-                  versionCode 1
-                  versionName "1.0"
-                  multiDexEnabled true
+          SIGN_BLOCK=$(cat << 'EOF'
+              signingConfigs {
+                  release {
+                      storeFile file("derinbarkod.keystore")
+                      storePassword System.getenv("CM_KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("CM_KEY_ALIAS")
+                      keyPassword System.getenv("CM_KEY_PASSWORD")
+                  }
               }
               buildTypes {
-                  release { minifyEnabled false; shrinkResources false }
-                  debug { minifyEnabled false }
+                  release {
+                      signingConfig signingConfigs.release
+                      minifyEnabled false
+                      shrinkResources false
+                  }
               }
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-              kotlinOptions { jvmTarget = "17" }
-              packagingOptions {
-                  resources { excludes += ["/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES"] }
-              }
-          }
-          dependencies {
-              implementation "androidx.multidex:multidex:2.0.1"
-          }
           EOF
-
-          # Manifest (package="" YOK)
-          mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application
-                  android:name="${applicationName}"
-                  android:label="DerinBarkod"
-                  android:icon="@mipmap/ic_launcher"
-                  android:usesCleartextTraffic="true">
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true"
-                      android:launchMode="singleTop"
-                      android:theme="@style/LaunchTheme"
-                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-                      android:hardwareAccelerated="true"
-                      android:windowSoftInputMode="adjustResize">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-
-      # 5) Pub get
-      - name: Bağımlılıkları al
+          )
+          APP_GRADLE="android/app/build.gradle"
+          # If 'signingConfigs.release' not in file, inject minimal block
+          if ! grep -q "signingConfigs.release" "$APP_GRADLE"; then
+            echo "Injecting signing config into $APP_GRADLE"
+            # Insert under 'android {' block
+            awk -v block="$SIGN_BLOCK" '
+              BEGIN{printed=0}
+              /android[[:space:]]*\{/ && !printed {print; print block; printed=1; next}
+              {print}
+            ' "$APP_GRADLE" > "$APP_GRADLE.tmp" && mv "$APP_GRADLE.tmp" "$APP_GRADLE"
+          else
+            echo "Signing config already present."
+          fi
+          echo "---- build.gradle (head) ----"
+          head -n 80 android/app/build.gradle || true
+      - name: Build signed AAB
         script: |
-          cd "$APP_DIR"
           flutter pub get
-
-      # 6) Derle (Flutter + Gradle fallback) — DÜZELTİLMİŞ!
-      - name: Debug APK derle (stacktrace; gradle fallback)
-        script: |
-          set -o pipefail
-          cd "$APP_DIR"
-          flutter clean
-          if ! flutter build apk --debug -v | tee build_log.txt; then
-            echo "Flutter build düştü, gradle assembleDebug deneniyor..."
-            # ÖNEMLİ: Dizini değiştirmeden, kökten gradle wrapper'ı android projesine işaret ederek çalıştır
-            ./android/gradlew -p android assembleDebug --no-daemon --stacktrace --info --debug | tee -a build_log.txt
-          fi
-
-      # 7) APK'yi topla
-      - name: Çıktıları listele ve APK'yi topla
-        script: |
-          cd "$APP_DIR"
-          echo "=== build/app/outputs ==="; ls -R build/app/outputs || true
-          echo "=== android/app/build/outputs ==="; ls -R android/app/build/outputs || true
-          mkdir -p artifacts
-          cp -f build/app/outputs/flutter-apk/*.apk artifacts/ 2>/dev/null || true
-          cp -f android/app/build/outputs/apk/**/*.apk artifacts/ 2>/dev/null || true
-          cp -f android/app/build/outputs/apk/*.apk artifacts/ 2>/dev/null || true
-          find build -type f -name "*.apk" -maxdepth 6 -print -exec cp -f {} artifacts/ \; || true
-          echo "Artifacts içeriği:"; ls -lh artifacts || true
-
-      # 8) Hata özeti (varsa)
-      - name: Hata özeti (varsa)
-        script: |
-          cd "$APP_DIR"
-          echo "===== FAILURE BLOĞU (varsa) =====" > failure_extract.txt
-          awk '/FAILURE: Build failed with an exception./{flag=1} flag{print} /BUILD FAILED/{flag=0}' build_log.txt | tail -n 200 >> failure_extract.txt || true
-          echo "================================="
-          if [ -z "$(ls -A artifacts/*.apk 2>/dev/null)" ]; then
-            echo "APK bulunamadı (muhtemelen build düştü)."
-            echo "---- Hata özeti ----"
-            tail -n 120 failure_extract.txt || true
-            exit 1
-          fi
-
+          flutter build appbundle --release
     artifacts:
-      - $APP_DIR/artifacts/*.apk
-      - $APP_DIR/build_log.txt
-      - $APP_DIR/failure_extract.txt
-      - $APP_DIR/android/**/*
+      - build/app/outputs/bundle/release/app-release.aab
