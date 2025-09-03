@@ -1,17 +1,10 @@
 
 workflows:
   debug_apk:
-    name: Android Debug APK
+    name: Android Debug APK (with Android v2 patch)
     max_build_duration: 60
     environment:
       flutter: stable
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: "main"
-          include: true
-          source: true
     scripts:
       - name: Flutter version & doctor
         script: |
@@ -24,7 +17,47 @@ workflows:
           mkdir -p android
           echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
           echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
-          cat android/local.properties
+      - name: Patch Android embedding (v2) and package path
+        script: |
+          set -e
+          APP_DIR="android/app"
+          SRC_OLD="$APP_DIR/src/main/kotlin/com/example/derin_barkod/MainActivity.kt"
+          SRC_NEW_DIR="$APP_DIR/src/main/kotlin/com/derinwifi/barkod"
+          SRC_NEW="$SRC_NEW_DIR/MainActivity.kt"
+          MANIFEST="$APP_DIR/src/main/AndroidManifest.xml"
+
+          # 1) Ensure new package directory exists
+          mkdir -p "$SRC_NEW_DIR"
+
+          # 2) Write new MainActivity with correct package
+          cat > "$SRC_NEW" << 'KOT'
+package com.derinwifi.barkod
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
+KOT
+
+          # 3) Remove old MainActivity if present
+          if [ -f "$SRC_OLD" ]; then
+            git rm -f "$SRC_OLD" 2>/dev/null || rm -f "$SRC_OLD"
+          fi
+
+          # 4) Inject flutterEmbedding=2 meta-data into AndroidManifest if missing
+          if [ -f "$MANIFEST" ] && ! grep -q 'android:name="flutterEmbedding"' "$MANIFEST"; then
+            awk '
+              /<\/application>/ && !done {
+                print "        <meta-data android:name=\"flutterEmbedding\" android:value=\"2\" />"
+                done=1
+              }
+              { print }
+            ' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
+          fi
+
+          echo "==== New MainActivity.kt ===="
+          sed -n '1,120p' "$SRC_NEW" || true
+          echo "==== AndroidManifest.xml (head) ===="
+          sed -n '1,120p' "$MANIFEST" || true
       - name: (Optional) Write google-services.json if CM_GOOGLESERVICES_JSON is set
         script: |
           if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
@@ -40,40 +73,47 @@ workflows:
     artifacts:
       - build/app/outputs/flutter-apk/app-debug.apk
 
-  release_apk_unsigned:
-    name: Android Release APK (unsigned)
-    max_build_duration: 60
-    environment:
-      flutter: stable
-    scripts:
-      - name: Setup local.properties
-        script: |
-          echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
-          echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
-      - name: (Optional) Write google-services.json
-        script: |
-          if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
-            echo "$CM_GOOGLESERVICES_JSON" | base64 --decode > android/app/google-services.json
-          fi
-      - name: Build release APK (unsigned)
-        script: |
-          flutter pub get
-          flutter build apk --release
-    artifacts:
-      - build/app/outputs/flutter-apk/app-release.apk
-
   release_aab_signed:
-    name: Android App Bundle (signed)
+    name: Android App Bundle (signed, with Android v2 patch)
     max_build_duration: 60
     environment:
       flutter: stable
       groups:
-        - keystore_creds    # define this group in Codemagic UI with CM_KEYSTORE, CM_KEYSTORE_PASSWORD, CM_KEY_ALIAS, CM_KEY_PASSWORD
+        - keystore_creds
     scripts:
       - name: Setup local.properties
         script: |
           echo "flutter.sdk=/Users/builder/programs/flutter" > android/local.properties
           echo "sdk.dir=/usr/local/share/android-sdk" >> android/local.properties
+      - name: Patch Android embedding (v2) and package path
+        script: |
+          set -e
+          APP_DIR="android/app"
+          SRC_OLD="$APP_DIR/src/main/kotlin/com/example/derin_barkod/MainActivity.kt"
+          SRC_NEW_DIR="$APP_DIR/src/main/kotlin/com/derinwifi/barkod"
+          SRC_NEW="$SRC_NEW_DIR/MainActivity.kt"
+          MANIFEST="$APP_DIR/src/main/AndroidManifest.xml"
+
+          mkdir -p "$SRC_NEW_DIR"
+          cat > "$SRC_NEW" << 'KOT'
+package com.derinwifi.barkod
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
+KOT
+          if [ -f "$SRC_OLD" ]; then
+            git rm -f "$SRC_OLD" 2>/dev/null || rm -f "$SRC_OLD"
+          fi
+          if [ -f "$MANIFEST" ] && ! grep -q 'android:name="flutterEmbedding"' "$MANIFEST"; then
+            awk '
+              /<\/application>/ && !done {
+                print "        <meta-data android:name=\"flutterEmbedding\" android:value=\"2\" />"
+                done=1
+              }
+              { print }
+            ' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
+          fi
       - name: (Optional) Write google-services.json
         script: |
           if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
@@ -118,7 +158,6 @@ workflows:
           else
             echo "Signing config already present."
           fi
-          head -n 80 android/app/build.gradle || true
       - name: Build signed AAB
         script: |
           flutter pub get
