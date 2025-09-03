@@ -1,6 +1,6 @@
 workflows:
   android_debug:
-    name: Android Debug (stabil & oto)
+    name: Android Debug (otonom + stabil)
     triggering:
       events:
         - push
@@ -12,7 +12,7 @@ workflows:
       flutter: stable
       java: 17
       vars:
-        # Paket adını istersen Codemagic env'den APPLICATION_ID ile geçebilirsin
+        # Paket adını istersen Codemagic env'de APPLICATION_ID ile geç
         APPLICATION_ID: com.derinwifi.barkod
 
     cache:
@@ -22,11 +22,20 @@ workflows:
         - .gradle
 
     scripts:
-      - name: Versiyon bilgisi
+      # 0) Proje kökünü (pubspec.yaml olan klasörü) bul
+      - name: App dizinini bul (pubspec.yaml)
         script: |
-          flutter --version
-          flutter doctor -v || true
+          set -e
+          APP_DIR=$(dirname "$(find . -maxdepth 5 -name pubspec.yaml | head -n1)")
+          if [ -z "$APP_DIR" ]; then
+            echo "pubspec.yaml bulunamadı. Repo kökünü kontrol et."
+            ls -la
+            exit 1
+          fi
+          echo "Bulunan APP_DIR: $APP_DIR"
+          echo "APP_DIR=$APP_DIR" >> $CM_ENV
 
+      # 1) Android SDK 34 ve Build-Tools
       - name: Android SDK 34 + Build-Tools kur
         script: |
           set -e
@@ -35,22 +44,25 @@ workflows:
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
           sdkmanager --list | head -n 50 || true
 
-      - name: Android klasörü & gradlew kontrol
+      # 2) Android klasörü & gradlew
+      - name: Android klasörü ve gradlew kontrol
         script: |
+          cd "$APP_DIR"
           if [ ! -d android ]; then
             echo "android/ yok; oluşturuluyor..."
             flutter create --platforms=android .
           fi
           chmod +x android/gradlew || true
-          echo "=== android dizinleri ==="; ls -la android || true; ls -la android/app || true
+          echo "=== android dizinleri ==="
+          ls -la android || true
+          ls -la android/app || true
 
+      # 3) local.properties yaz
       - name: local.properties yaz (flutter.sdk & sdk.dir)
         script: |
-          set -e
+          cd "$APP_DIR"
           export ANDROID_HOME=${ANDROID_SDK_ROOT:-/opt/android-sdk}
-          # FLUTTER_ROOT yoksa which flutter'dan türet
           FLUTTER_ROOT="${FLUTTER_ROOT:-$(dirname $(dirname $(which flutter)))}"
-          echo "FLUTTER_ROOT=$FLUTTER_ROOT"
           mkdir -p android
           {
             echo "flutter.sdk=$FLUTTER_ROOT"
@@ -59,13 +71,14 @@ workflows:
           echo "=== local.properties ==="
           cat android/local.properties
 
-      - name: Gradle/AGP/Kotlin/SDK pin (loader YOK, includeBuild VAR)
+      # 4) Gradle/AGP/Kotlin pin (Flutter plugin SDK'dan include)
+      - name: Gradle/AGP/Kotlin/SDK pin
         script: |
           set -e
-          cd android
+          cd "$APP_DIR/android"
           APP_ID="${APPLICATION_ID:-com.derinwifi.barkod}"
 
-          # 1) Gradle wrapper -> 8.7 (uyumlu)
+          # Gradle wrapper -> 8.7
           mkdir -p gradle/wrapper
           cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
           distributionBase=GRADLE_USER_HOME
@@ -75,7 +88,7 @@ workflows:
           distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-all.zip
           EOF
 
-          # 2) settings.gradle (PLUGIN LOADER YOK) — Flutter SDK içindeki Gradle'ı include et
+          # settings.gradle — plugin loader YOK; SDK'dan includeBuild
           cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
@@ -84,21 +97,15 @@ workflows:
                   gradlePluginPortal()
               }
           }
-          // Flutter SDK yolunu local.properties'ten al
           def localProperties = new Properties()
           def localPropertiesFile = new File(rootProject.projectDir, "local.properties")
           if (localPropertiesFile.exists()) {
               localPropertiesFile.withReader("UTF-8") { reader -> localProperties.load(reader) }
           }
           def flutterSdkPath = localProperties.getProperty("flutter.sdk")
-          if (flutterSdkPath == null) {
-              flutterSdkPath = System.getenv("FLUTTER_ROOT")
-          }
-          if (flutterSdkPath == null) {
-              throw new GradleException("Flutter SDK not found. Set flutter.sdk in android/local.properties")
-          }
+          if (flutterSdkPath == null) { flutterSdkPath = System.getenv("FLUTTER_ROOT") }
+          if (flutterSdkPath == null) { throw new GradleException("Flutter SDK not found. Set flutter.sdk in android/local.properties") }
 
-          // Flutter Gradle eklentisini doğrudan SDK'dan projeye dahil et
           includeBuild("${flutterSdkPath}/packages/flutter_tools/gradle")
 
           plugins {
@@ -109,7 +116,7 @@ workflows:
           include(":app")
           EOF
 
-          # 3) top-level build.gradle (repo'lar)
+          # top-level build.gradle
           cat > build.gradle <<'EOF'
           buildscript {
               repositories { google(); mavenCentral() }
@@ -120,13 +127,12 @@ workflows:
           }
           EOF
 
-          # 4) app/build.gradle — AGP8 uyumlu, SDK 34, Java17, multidex
+          # app/build.gradle
           cat > app/build.gradle <<EOF
           plugins {
               id "com.android.application"
               id "org.jetbrains.kotlin.android"
-              // Flutter gradle plugin, SDK'dan includeBuild ile geliyor
-              id "dev.flutter.flutter-gradle-plugin"
+              id "dev.flutter.flutter-gradle-plugin"   // SDK'dan includeBuild ile geliyor
           }
           android {
               namespace "${APP_ID}"
@@ -155,7 +161,7 @@ workflows:
           dependencies {
               implementation "androidx.multidex:multidex:2.0.1"
           }
-          // Gerekirse çakışma sabitleme örnekleri:
+          // Gerekirse sürüm sabitleme örneği:
           // configurations.all {
           //   resolutionStrategy {
           //     force 'com.google.android.gms:play-services-basement:18.3.0'
@@ -164,7 +170,7 @@ workflows:
           // }
           EOF
 
-          # 5) Manifest — package="" YOK!
+          # Manifest (package="" YOK)
           mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -189,14 +195,18 @@ workflows:
               </application>
           </manifest>
           EOF
-          cd -
 
+      # 5) Pub get
       - name: Bağımlılıkları al
-        script: flutter pub get
+        script: |
+          cd "$APP_DIR"
+          flutter pub get
 
+      # 6) Derle (Flutter + Gradle fallback)
       - name: Debug APK derle (stacktrace; gradle fallback)
         script: |
           set -o pipefail
+          cd "$APP_DIR"
           flutter clean
           if ! flutter build apk --debug -v | tee build_log.txt; then
             echo "Flutter build düştü, gradle assembleDebug deneniyor..."
@@ -205,8 +215,10 @@ workflows:
             (cd android && ./gradlew assembleDebug --no-daemon --stacktrace --info --debug) | tee -a build_log.txt
           fi
 
+      # 7) APK'yi topla
       - name: Çıktıları listele ve APK'yi topla
         script: |
+          cd "$APP_DIR"
           echo "=== build/app/outputs ==="; ls -R build/app/outputs || true
           echo "=== android/app/build/outputs ==="; ls -R android/app/build/outputs || true
           mkdir -p artifacts
@@ -216,8 +228,10 @@ workflows:
           find build -type f -name "*.apk" -maxdepth 6 -print -exec cp -f {} artifacts/ \; || true
           echo "Artifacts içeriği:"; ls -lh artifacts || true
 
+      # 8) Hata özeti (varsa)
       - name: Hata özeti (varsa)
         script: |
+          cd "$APP_DIR"
           echo "===== FAILURE BLOĞU (varsa) =====" > failure_extract.txt
           awk '/FAILURE: Build failed with an exception./{flag=1} flag{print} /BUILD FAILED/{flag=0}' build_log.txt | tail -n 200 >> failure_extract.txt || true
           echo "================================="
@@ -229,7 +243,7 @@ workflows:
           fi
 
     artifacts:
-      - artifacts/*.apk
-      - build_log.txt
-      - failure_extract.txt
-      - android/**/*
+      - $APP_DIR/artifacts/*.apk
+      - $APP_DIR/build_log.txt
+      - $APP_DIR/failure_extract.txt
+      - $APP_DIR/android/**/*
