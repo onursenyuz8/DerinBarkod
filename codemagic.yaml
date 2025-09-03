@@ -1,7 +1,6 @@
-
 workflows:
   debug_apk:
-    name: Android Debug APK (with Android v2 patch)
+    name: Android Debug APK (with patch)
     max_build_duration: 60
     environment:
       flutter: stable
@@ -26,24 +25,20 @@ workflows:
           SRC_NEW="$SRC_NEW_DIR/MainActivity.kt"
           MANIFEST="$APP_DIR/src/main/AndroidManifest.xml"
 
-          # 1) Ensure new package directory exists
           mkdir -p "$SRC_NEW_DIR"
 
-          # 2) Write new MainActivity with correct package
-          cat > "$SRC_NEW" << 'KOT'
-package com.derinwifi.barkod
+          cat > "$SRC_NEW" <<'EOF'
+          package com.derinwifi.barkod
 
-import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.android.FlutterActivity
 
-class MainActivity : FlutterActivity()
-KOT
+          class MainActivity : FlutterActivity()
+          EOF
 
-          # 3) Remove old MainActivity if present
           if [ -f "$SRC_OLD" ]; then
-            git rm -f "$SRC_OLD" 2>/dev/null || rm -f "$SRC_OLD"
+            rm -f "$SRC_OLD"
           fi
 
-          # 4) Inject flutterEmbedding=2 meta-data into AndroidManifest if missing
           if [ -f "$MANIFEST" ] && ! grep -q 'android:name="flutterEmbedding"' "$MANIFEST"; then
             awk '
               /<\/application>/ && !done {
@@ -55,9 +50,9 @@ KOT
           fi
 
           echo "==== New MainActivity.kt ===="
-          sed -n '1,120p' "$SRC_NEW" || true
-          echo "==== AndroidManifest.xml (head) ===="
-          sed -n '1,120p' "$MANIFEST" || true
+          head -n 20 "$SRC_NEW" || true
+          echo "==== AndroidManifest.xml (snippet) ===="
+          head -n 40 "$MANIFEST" || true
       - name: (Optional) Write google-services.json if CM_GOOGLESERVICES_JSON is set
         script: |
           if [ -n "${CM_GOOGLESERVICES_JSON:-}" ]; then
@@ -74,12 +69,12 @@ KOT
       - build/app/outputs/flutter-apk/app-debug.apk
 
   release_aab_signed:
-    name: Android App Bundle (signed, with Android v2 patch)
+    name: Android App Bundle (signed, with patch)
     max_build_duration: 60
     environment:
       flutter: stable
       groups:
-        - keystore_creds
+        - keystore_creds    # bu grubu Codemagic UI'da oluştur
     scripts:
       - name: Setup local.properties
         script: |
@@ -95,16 +90,19 @@ KOT
           MANIFEST="$APP_DIR/src/main/AndroidManifest.xml"
 
           mkdir -p "$SRC_NEW_DIR"
-          cat > "$SRC_NEW" << 'KOT'
-package com.derinwifi.barkod
 
-import io.flutter.embedding.android.FlutterActivity
+          cat > "$SRC_NEW" <<'EOF'
+          package com.derinwifi.barkod
 
-class MainActivity : FlutterActivity()
-KOT
+          import io.flutter.embedding.android.FlutterActivity
+
+          class MainActivity : FlutterActivity()
+          EOF
+
           if [ -f "$SRC_OLD" ]; then
-            git rm -f "$SRC_OLD" 2>/dev/null || rm -f "$SRC_OLD"
+            rm -f "$SRC_OLD"
           fi
+
           if [ -f "$MANIFEST" ] && ! grep -q 'android:name="flutterEmbedding"' "$MANIFEST"; then
             awk '
               /<\/application>/ && !done {
@@ -126,8 +124,7 @@ KOT
             exit 1
           fi
           echo "$CM_KEYSTORE" | base64 --decode > android/app/derinbarkod.keystore
-          ls -l android/app/derinbarkod.keystore
-      - name: Patch Gradle signingConfig if missing (non-destructive)
+      - name: Patch Gradle signingConfig if missing
         script: |
           SIGN_BLOCK=$(cat << 'EOF'
               signingConfigs {
@@ -149,14 +146,11 @@ KOT
           )
           APP_GRADLE="android/app/build.gradle"
           if ! grep -q "signingConfigs.release" "$APP_GRADLE"; then
-            echo "Injecting signing config into $APP_GRADLE"
             awk -v block="$SIGN_BLOCK" '
               BEGIN{printed=0}
               /android[[:space:]]*\{/ && !printed {print; print block; printed=1; next}
               {print}
             ' "$APP_GRADLE" > "$APP_GRADLE.tmp" && mv "$APP_GRADLE.tmp" "$APP_GRADLE"
-          else
-            echo "Signing config already present."
           fi
       - name: Build signed AAB
         script: |
