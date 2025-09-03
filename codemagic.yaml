@@ -1,9 +1,17 @@
 workflows:
   android_debug:
-    name: Android Debug (SDK fixli)
+    name: Android Debug (stabil & oto)
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+
     environment:
       flutter: stable
       java: 17
+
     cache:
       cache_paths:
         - $HOME/.pub-cache
@@ -23,13 +31,19 @@ workflows:
           export ANDROID_HOME=${ANDROID_SDK_ROOT:-/opt/android-sdk}
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
-          sdkmanager --list || true
+          sdkmanager --list | head -n 50 || true
 
-      - name: Gradle/AGP pin (uyumluluk)
+      # PROBLEM ÇIKARAN ADIMIN YERİNE: dosyaları BAŞTAN doğru içerikle yaz
+      - name: Gradle/AGP pin (uyumluluk) — basit ve deterministik
         script: |
-          set -e
-          cd android
-          # Gradle 8.7
+          set +e
+          set -x
+          cd android || exit 0
+
+          # Paket adını değiştirmek istersen Codemagic env'de APPLICATION_ID=... tanımla
+          APP_ID="${APPLICATION_ID:-com.derinwifi.barkod}"
+
+          # 1) Gradle wrapper -> 8.7
           mkdir -p gradle/wrapper
           cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
           distributionBase=GRADLE_USER_HOME
@@ -39,42 +53,129 @@ workflows:
           distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-all.zip
           EOF
 
-          # settings.gradle -> AGP 8.6.0, Kotlin 1.9.24
-          if [ ! -f settings.gradle ]; then echo > settings.gradle; fi
-          if ! grep -q 'pluginManagement' settings.gradle; then
-            sed -i '1s;^;pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\n;' settings.gradle
-          fi
-          if ! grep -q 'id "dev.flutter.flutter-plugin-loader"' settings.gradle; then
-            sed -i '1s;^;plugins { id "dev.flutter.flutter-plugin-loader" version "1.0.0" }\n;' settings.gradle
-          fi
-          grep -q 'id "com.android.application" version "8.6.0"' settings.gradle || \
-            sed -i '1s;^;plugins { id "com.android.application" version "8.6.0" apply false }\n;' settings.gradle
-          grep -q 'id "org.jetbrains.kotlin.android" version "1.9.24"' settings.gradle || \
-            sed -i '1s;^;plugins { id "org.jetbrains.kotlin.android" version "1.9.24" apply false }\n;' settings.gradle
+          # 2) settings.gradle -> pluginManagement + AGP/Kotlin pin
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
 
-          # app/build.gradle -> SDK 34, namespace, Java 17, multidex
-          if [ -f app/build.gradle ]; then
-            sed -i 's/compileSdkVersion [0-9]\+/compileSdkVersion 34/' app/build.gradle || true
-            sed -i 's/targetSdkVersion [0-9]\+/targetSdkVersion 34/' app/build.gradle || true
-            grep -q '^ *namespace ' app/build.gradle || \
-              awk '1; /android *{/ {print "    namespace \"com.derinwifi.barkod\""}' app/build.gradle > app/build.gradle.new && mv app/build.gradle.new app/build.gradle
-            grep -q 'sourceCompatibility JavaVersion.VERSION_17' app/build.gradle || \
-              awk '1; /android *{/ {print "    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }"; print "    kotlinOptions { jvmTarget = \"17\" }"}' app/build.gradle > app/build.gradle.new && mv app/build.gradle.new app/build.gradle
-            grep -q 'multiDexEnabled true' app/build.gradle || sed -i 's/defaultConfig {/defaultConfig {\n        multiDexEnabled true/' app/build.gradle
-          fi
+          plugins {
+              id "dev.flutter.flutter-plugin-loader" version "1.0.0"
+              id "com.android.application" version "8.6.0" apply false
+              id "org.jetbrains.kotlin.android" version "1.9.24" apply false
+          }
 
-          # Manifest'te package="" varsa sil (AGP 8+ için)
-          if [ -f app/src/main/AndroidManifest.xml ]; then
-            sed -i 's/ package="[^"]*"//' app/src/main/AndroidManifest.xml || true
-          fi
+          include(":app")
+          EOF
 
+          # 3) top-level build.gradle (repo'lar sabit)
+          cat > build.gradle <<'EOF'
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath "com.android.tools.build:gradle:8.6.0" }
+          }
+          allprojects {
+              repositories { google(); mavenCentral() }
+          }
+          EOF
+
+          # 4) app/build.gradle -> AGP8 uyumlu, SDK 34, Java17, multidex
+          cat > app/build.gradle <<EOF
+          plugins {
+              id "com.android.application"
+              id "org.jetbrains.kotlin.android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+
+          android {
+              namespace "${APP_ID}"
+              compileSdkVersion 34
+
+              defaultConfig {
+                  applicationId "${APP_ID}"
+                  minSdkVersion 21
+                  targetSdkVersion 34
+                  versionCode 1
+                  versionName "1.0"
+                  multiDexEnabled true
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      shrinkResources false
+                  }
+                  debug {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              packagingOptions {
+                  resources {
+                      excludes += ["/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES"]
+                  }
+              }
+          }
+
+          dependencies {
+              implementation "androidx.multidex:multidex:2.0.1"
+          }
+          EOF
+
+          # 5) Manifest (package="" OLMAYACAK) — temiz şablon
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:name="${applicationName}"
+                  android:label="DerinBarkod"
+                  android:icon="@mipmap/ic_launcher"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <queries>
+                      <intent>
+                          <action android:name="android.intent.action.PROCESS_TEXT"/>
+                          <data android:mimeType="text/plain"/>
+                      </intent>
+                  </queries>
+              </application>
+          </manifest>
+          EOF
+
+          echo "=== android dosyaları ==="
+          ls -R .
           cd -
+          set +x
 
       - name: Debug APK derle (stacktrace ile)
         script: |
           set -o pipefail
           flutter clean
-          # Eğer Flutter komutu düşerse, Gradle'ı da deneyelim:
           if ! flutter build apk --debug -v | tee build_log.txt; then
             echo "Flutter build düştü, gradle assembleDebug deneniyor..."
             (cd android && ./gradlew assembleDebug --stacktrace --no-daemon) | tee -a build_log.txt
@@ -91,7 +192,7 @@ workflows:
           find build -type f -name "*.apk" -maxdepth 6 -print -exec cp -f {} artifacts/ \; || true
           echo "Artifacts içeriği:"; ls -lh artifacts || true
 
-      - name: Hata özeti
+      - name: Hata özeti (varsa)
         script: |
           echo "===== FAILURE BLOĞU (varsa) =====" > failure_extract.txt
           awk '/FAILURE: Build failed with an exception./{flag=1} flag{print} /BUILD FAILED/{flag=0}' build_log.txt | tail -n 200 >> failure_extract.txt || true
