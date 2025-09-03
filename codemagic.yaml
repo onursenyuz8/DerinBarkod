@@ -1,131 +1,25 @@
-workflows:
-  android_debug:
-    name: Android Debug
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: main
-          include: true
-
-    environment:
-      flutter: stable
-      java: 17
-
-    cache:
-      cache_paths:
-        - $HOME/.pub-cache
-        - android/.gradle
-        - .gradle
-
-    scripts:
-      - name: Ortam bilgisi
+      - name: Çıktı ağaçlarını listele
         script: |
-          flutter --version
-          flutter doctor -v || true
+          echo "=== build/app/outputs içeriği ==="
+          (ls -R build/app/outputs || true)
+          echo "=== android/app/build/outputs içeriği (gradle yol) ==="
+          (ls -R android/app/build/outputs || true)
 
-      - name: Android dizini ve bağımlılıklar
+      - name: APK'leri topla (tüm muhtemel yollar)
         script: |
-          if [ ! -d "android" ]; then
-            echo "android/ yok, oluşturuluyor..."
-            flutter create --platforms=android .
+          mkdir -p artifacts
+          # Flutter tek-variant yolu
+          cp -f build/app/outputs/flutter-apk/*.apk artifacts/ 2>/dev/null || true
+          # Gradle çoklu-variant/flavor yolu
+          cp -f android/app/build/outputs/apk/**/*.apk artifacts/ 2>/dev/null || true
+          cp -f android/app/build/outputs/apk/*.apk artifacts/ 2>/dev/null || true
+          # Her ihtimale karşı tüm outputs'tan tara
+          find build -type f -name "*.apk" -maxdepth 6 -print -exec cp -f {} artifacts/ \; || true
+          # Bulunamadıysa anlamlı mesaj ver
+          if [ -z "$(ls -A artifacts/*.apk 2>/dev/null)" ]; then
+            echo "APK bulunamadı. Muhtemelen build düşmüş ya da variant ismi farklı."
+            echo "Yukarıdaki 'ls -R' çıktılarında gerçek yolu görüp artifacts kalıbını genişletelim."
+          else
+            echo "Toplanan APK'ler:"
+            ls -lh artifacts/*.apk
           fi
-          chmod +x android/gradlew || true
-          flutter pub get
-
-      - name: Gradle/AGP/Kotlin/SDK normalize (zorunlu pin)
-        script: |
-          set +e
-          set -x
-          cd android || exit 0
-
-          # 1) Gradle wrapper -> 8.7 (dosyayı baştan yaz)
-          mkdir -p gradle/wrapper
-          cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-all.zip
-          EOF
-
-          # 2) settings.gradle -> plugin management + versiyonlar
-          if [ ! -f settings.gradle ]; then
-            touch settings.gradle
-          fi
-          grep -q 'pluginManagement' settings.gradle || \
-            (printf 'pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\n' | cat - settings.gradle > settings.gradle.new && mv settings.gradle.new settings.gradle)
-          grep -q 'plugins {' settings.gradle || \
-            (printf 'plugins { id "dev.flutter.flutter-plugin-loader" version "1.0.0" }\n' | cat - settings.gradle > settings.gradle.new && mv settings.gradle.new settings.gradle)
-          # AGP / Kotlin pin
-          grep -q 'id "com.android.application" version "8.6.0"' settings.gradle || \
-            sed -i '1s;^;plugins { id "com.android.application" version "8.6.0" apply false }\n; ' settings.gradle
-          grep -q 'id "org.jetbrains.kotlin.android" version "1.9.24"' settings.gradle || \
-            sed -i '1s;^;plugins { id "org.jetbrains.kotlin.android" version "1.9.24" apply false }\n; ' settings.gradle
-
-          # 3) top-level build.gradle (varsa) - repo & AGP classpath fix
-          if [ -f build.gradle ]; then
-            grep -q 'mavenCentral()' build.gradle || sed -i 's/repositories {/repositories { mavenCentral()/g' build.gradle || true
-            sed -i 's/com.android.tools.build:gradle:[0-9.]\+/com.android.tools.build:gradle:8.6.0/' build.gradle || true
-          fi
-
-          # 4) app/build.gradle - SDK 34, namespace, Java 17, multidex
-          if [ -f app/build.gradle ]; then
-            sed -i 's/compileSdkVersion [0-9]\+/compileSdkVersion 34/' app/build.gradle || true
-            sed -i 's/targetSdkVersion [0-9]\+/targetSdkVersion 34/' app/build.gradle || true
-
-            if ! grep -q '^ *namespace ' app/build.gradle; then
-              PKG=$(grep -Po 'applicationId\s*"\K[^"]+' app/build.gradle || true)
-              [ -z "$PKG" ] && PKG=$(grep -Po 'package="\K[^"]+' app/src/main/AndroidManifest.xml || echo "com.example.app")
-              if grep -q '^android *{' app/build.gradle; then
-                awk -v ns="$PKG" '{
-                  print
-                  if ($0 ~ /^android *{/) {print "    namespace \"" ns "\""}
-                }' app/build.gradle > app/build.gradle.new && mv app/build.gradle.new app/build.gradle
-              else
-                printf 'android {\n    namespace "%s"\n}\n\n' "$PKG" | cat - app/build.gradle > app/build.gradle.new && mv app/build.gradle.new app/build.gradle
-              fi
-            fi
-
-            grep -q 'sourceCompatibility JavaVersion.VERSION_17' app/build.gradle || \
-              awk '1; /android *{/ {print "    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }"; print "    kotlinOptions { jvmTarget = \"17\" }"}' app/build.gradle > app/build.gradle.new && mv app/build.gradle.new app/build.gradle
-
-            grep -q 'multiDexEnabled true' app/build.gradle || sed -i 's/defaultConfig {/defaultConfig {\n        multiDexEnabled true/' app/build.gradle
-          fi
-
-          # 5) Manifest: package="" varsa kaldır
-          if [ -f app/src/main/AndroidManifest.xml ]; then
-            sed -i 's/ package="[^"]*"//' app/src/main/AndroidManifest.xml || true
-          fi
-
-          cd -
-          set +x
-
-      - name: Derleme (detaylı log + rapor)
-        script: |
-          set -o pipefail
-          flutter clean
-          flutter build apk --debug -v | tee build_log.txt
-          echo "===== FAILURE BLOĞU (varsa) =====" > failure_extract.txt
-          awk '/FAILURE: Build failed with an exception./{flag=1} flag{print} /BUILD FAILED/{flag=0}' build_log.txt | tail -n 200 >> failure_extract.txt || true
-
-      - name: APK'yi kolay bulunur yap
-        script: |
-          if [ -f build/app/outputs/flutter-apk/app-debug.apk ]; then
-            mkdir -p artifacts
-            cp build/app/outputs/flutter-apk/app-debug.apk artifacts/app-debug-${CM_BUILD_ID}.apk
-          fi
-
-      - name: Hata varsa kır
-        script: |
-          if grep -q "FAILURE: Build failed with an exception." build_log.txt; then
-            echo "================ HATA ÖZETİ ================"
-            cat failure_extract.txt || true
-            echo "============================================"
-            exit 1
-          fi
-
-    artifacts:
-      - artifacts/*.apk
-      - build/app/outputs/flutter-apk/*.apk
-      - ci_artifacts/**/*   # (yoksa görünmez)
